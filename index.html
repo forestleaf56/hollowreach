@@ -323,6 +323,20 @@
       <div class="invGrid" id="shopGrid"></div>
     </div>
 
+    <!-- ============ PAUSE / SYSTEM MENU ============ -->
+    <div id="pausePanel" class="panel">
+      <div class="panelHead">
+        <div class="panelTitle">Menu</div>
+        <div class="panelClose" id="pauseClose">✕</div>
+      </div>
+      <div class="menuCol" style="max-width:none; margin-top:4px;">
+        <button class="menuBtn primary" id="btnResume">Resume</button>
+        <button class="menuBtn" id="btnSaveNow">Save Game</button>
+        <button class="menuBtn" id="btnQuitTitle">Quit to Title</button>
+      </div>
+      <div class="emptyNote" id="pauseSaveNote" style="padding-top:14px;"></div>
+    </div>
+
     <!-- ============ QUEST LOG PANEL ============ -->
     <div id="questPanel" class="panel">
       <div class="panelHead">
@@ -1612,6 +1626,42 @@ document.getElementById('btnQuests').addEventListener('click', ()=>{
 });
 document.getElementById('questClose').addEventListener('click', ()=>document.getElementById('questPanel').style.display='none');
 
+/* ---------- Pause / system menu ---------- */
+document.getElementById('menuBtnTop').addEventListener('click', ()=>{
+  sfx.click();
+  document.getElementById('pauseSaveNote').textContent = "";
+  document.getElementById('pausePanel').style.display = 'flex';
+});
+document.getElementById('pauseClose').addEventListener('click', ()=>document.getElementById('pausePanel').style.display='none');
+document.getElementById('btnResume').addEventListener('click', ()=>{
+  sfx.click();
+  document.getElementById('pausePanel').style.display='none';
+});
+document.getElementById('btnSaveNow').addEventListener('click', async ()=>{
+  sfx.click();
+  const note = document.getElementById('pauseSaveNote');
+  if (mode !== 'over'){
+    note.textContent = "Leave the cave first to save.";
+    return;
+  }
+  note.textContent = "Saving…";
+  await saveGame();
+  note.textContent = "Saved.";
+});
+document.getElementById('btnQuitTitle').addEventListener('click', async ()=>{
+  sfx.click();
+  if (!confirm("Quit to the title screen? Your progress will be saved first.")) return;
+  if (mode === 'over') await saveGame();
+  gameRunning = false;
+  stopAmbient();
+  document.getElementById('pausePanel').style.display = 'none';
+  document.getElementById('gameScreen').style.display = 'none';
+  document.getElementById('titleScreen').style.display = 'flex';
+  hasSaveGame().then(has=>{
+    document.getElementById('btnContinue').style.display = has ? 'block' : 'none';
+  });
+});
+
 /* =========================================================================
    CAVES — a separate bounded dungeon layer
    Each cave mouth in the overworld leads to its own procedurally carved
@@ -1894,7 +1944,9 @@ document.getElementById('btnAttack').addEventListener('mousedown', doAttack);
    ========================================================================= */
 
 let lastT = performance.now();
+let gameRunning = false;
 function loop(t){
+  if (!gameRunning) return;
   const dt = Math.min((t-lastT)/1000, 0.05);
   lastT = t;
 
@@ -2009,48 +2061,58 @@ document.getElementById('btnMute').addEventListener('click', ()=>{
 
 /* =========================================================================
    SAVE / LOAD
-   Uses Claude's per-user persistent artifact storage (window.storage), so
-   progress is tied to your Claude account when playing here. If you export
-   this file to run on your own site, swap these calls for localStorage —
-   same shape, different API — and it'll work the same way standalone.
+   Tries Claude's per-account storage first (works while playing inside a
+   live Claude view); falls back to the browser's own localStorage, which is
+   what actually persists once this file is opened/closed as a normal
+   webpage — the more common case for a standalone game.
    ========================================================================= */
 
 const SAVE_KEY = "hollow_reach_save_v1";
-let storageBroken = false;
-function storageReady(){ return typeof window !== 'undefined' && !!window.storage && !storageBroken; }
+let claudeStorageBroken = false;
+
+async function storageSetRaw(value){
+  if (window.storage && !claudeStorageBroken){
+    try{ await window.storage.set(SAVE_KEY, value, false); return true; }
+    catch(err){ claudeStorageBroken = true; console.warn('Claude storage unavailable, falling back to localStorage.', err); }
+  }
+  try{ localStorage.setItem(SAVE_KEY, value); return true; }
+  catch(err){ console.warn('No storage available — playing without persistence.', err); return false; }
+}
+
+async function storageGetRaw(){
+  if (window.storage && !claudeStorageBroken){
+    try{ const r = await window.storage.get(SAVE_KEY); if (r) return r.value; }
+    catch(err){ claudeStorageBroken = true; }
+  }
+  try{ return localStorage.getItem(SAVE_KEY); }
+  catch(err){ return null; }
+}
 
 async function saveGame(){
-  if (!storageReady() || mode!=='over' || !player.alive) return;
-  try{
-    const npcStates = [];
-    npcCache.forEach(list=>list.forEach(n=>{
-      npcStates.push({ id:n.id, offeredQuest:n.offeredQuest, mainStep:n.mainStep, isMainGiver:n.isMainGiver });
-    }));
-    const payload = {
-      seedNum: SEED, mainVillageKey,
-      player: { x:player.x, y:player.y, hp:player.hp, maxHp:player.maxHp, level:player.level, xp:player.xp, xpNext:player.xpNext },
-      gold, inventory, equipped, quests, questIdCounter, lootRollCounter,
-      npcStates, savedAt: Date.now()
-    };
-    await window.storage.set(SAVE_KEY, JSON.stringify(payload), false);
-  } catch(err){
-    storageBroken = true; // don't keep retrying every 20s if the environment can't support it
-    console.warn('Save unavailable in this environment — playing without persistence.', err);
-  }
+  if (mode!=='over' || !player.alive) return;
+  const npcStates = [];
+  npcCache.forEach(list=>list.forEach(n=>{
+    npcStates.push({ id:n.id, offeredQuest:n.offeredQuest, mainStep:n.mainStep, isMainGiver:n.isMainGiver });
+  }));
+  const payload = {
+    seedNum: SEED, mainVillageKey,
+    player: { x:player.x, y:player.y, hp:player.hp, maxHp:player.maxHp, level:player.level, xp:player.xp, xpNext:player.xpNext },
+    gold, inventory, equipped, quests, questIdCounter, lootRollCounter,
+    npcStates, savedAt: Date.now()
+  };
+  await storageSetRaw(JSON.stringify(payload));
 }
 
 async function hasSaveGame(){
-  if (!storageReady()) return false;
-  try{ const r = await window.storage.get(SAVE_KEY); return !!r; }
-  catch(e){ storageBroken = true; return false; }
+  try{ return !!(await storageGetRaw()); }
+  catch(e){ return false; }
 }
 
 async function loadGame(){
-  if (!storageReady()) return false;
   try{
-    const r = await window.storage.get(SAVE_KEY);
-    if (!r) return false;
-    const data = JSON.parse(r.value);
+    const raw = await storageGetRaw();
+    if (!raw) return false;
+    const data = JSON.parse(raw);
 
     SEED = data.seedNum;
     mainVillageKey = data.mainVillageKey || null;
@@ -2076,7 +2138,7 @@ async function loadGame(){
     recomputePlayerStats();
     camera.x = player.x; camera.y = player.y;
     return true;
-  } catch(err){ storageBroken = true; console.warn('Load unavailable in this environment.', err); return false; }
+  } catch(err){ console.warn('Load failed.', err); return false; }
 }
 
 
@@ -2179,6 +2241,7 @@ function beginGameLoop(){
   initAudio();
   startAmbient();
   lastT = performance.now();
+  gameRunning = true;
   requestAnimationFrame(loop);
 }
 
